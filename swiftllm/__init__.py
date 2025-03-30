@@ -7,3 +7,5 @@ from swiftllm.server.structs import RawRequest
 
 # The Model for offline inference
 from swiftllm.worker.model import LlamaModel
+
+from swiftllm.worker.output import ModelOutput

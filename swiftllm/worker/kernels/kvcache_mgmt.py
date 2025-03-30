@@ -51,8 +51,8 @@ def _fwd_kvcache_mgmt_prefill_kernel(
 def _fwd_kvcache_mgmt_decoding_kernel(
     k_cache: torch.Tensor,	# [num_blocks, num_layers, num_kv_heads, block_size, head_dim], contiguous
     v_cache: torch.Tensor,	# [num_blocks, num_layers, num_kv_heads, block_size, head_dim], contiguous
-    k: torch.Tensor,	# [num_decoding_seqs, num_kv_heads, head_dim], contiguous
-    v: torch.Tensor,	# [num_decoding_seqs, num_kv_heads, head_dim], contiguous
+    k: torch.Tensor,	# [num_decoding_seqs * num_lookahead_tokens, num_kv_heads, head_dim], contiguous
+    v: torch.Tensor,	# [num_decoding_seqs * num_lookahead_tokens, num_kv_heads, head_dim], contiguous
     block_table: torch.Tensor,  # [*, max_blocks_per_seq], contiguous
     decoding_seq_ids: torch.Tensor,  # [num_decoding_seqs], contiguous
     decoding_seq_lens: torch.Tensor,  # [num_decoding_seqs], contiguous
@@ -63,18 +63,37 @@ def _fwd_kvcache_mgmt_decoding_kernel(
     block_size: tl.constexpr,
     head_dim: tl.constexpr,
     max_blocks_per_seq: tl.constexpr,
+    num_lookahead_tokens: tl.constexpr
 ):
     # grid shape: [num_decoding_seqs]
+    # my_batch_id = tl.program_id(0).to(tl.int64)
+    # my_seq_id = tl.load(decoding_seq_ids + my_batch_id)
+    # my_seq_len = tl.load(decoding_seq_lens + my_batch_id)
+    # my_block_id = (my_seq_len-1) // block_size
+    # my_block_offset = (my_seq_len-1) % block_size
+    # my_block_index = tl.load(block_table + my_seq_id*max_blocks_per_seq + my_block_id).to(tl.int64)
+
+    # offs_kv = my_batch_id*num_kv_heads*head_dim + (tl.arange(0, num_kv_heads)*head_dim)[:, None] + tl.arange(0, head_dim)[None, :]
+    # offs_kvcache = (my_block_index*num_layers+cur_layer)*num_kv_heads*block_size*head_dim + (tl.arange(0, num_kv_heads)*block_size*head_dim)[:, None] + my_block_offset*head_dim + tl.arange(0, head_dim)[None, :]
+
+    # tl.store(k_cache + offs_kvcache, tl.load(k + offs_kv))
+    # tl.store(v_cache + offs_kvcache, tl.load(v + offs_kv))
+
+    # grid shape: [num_decoding_seqs, num_lookahead_tokens]
     my_batch_id = tl.program_id(0).to(tl.int64)
+    my_token_id = tl.program_id(1).to(tl.int64)
     my_seq_id = tl.load(decoding_seq_ids + my_batch_id)
     my_seq_len = tl.load(decoding_seq_lens + my_batch_id)
-    my_block_id = (my_seq_len-1) // block_size
-    my_block_offset = (my_seq_len-1) % block_size
+
+    my_block_id = (my_seq_len-num_lookahead_tokens+my_token_id) // block_size
+    my_block_offset = (my_seq_len-num_lookahead_tokens+my_token_id) % block_size
     my_block_index = tl.load(block_table + my_seq_id*max_blocks_per_seq + my_block_id).to(tl.int64)
 
-    offs_kv = my_batch_id*num_kv_heads*head_dim + (tl.arange(0, num_kv_heads)*head_dim)[:, None] + tl.arange(0, head_dim)[None, :]
-    offs_kvcache = (my_block_index*num_layers+cur_layer)*num_kv_heads*block_size*head_dim + (tl.arange(0, num_kv_heads)*block_size*head_dim)[:, None] + my_block_offset*head_dim + tl.arange(0, head_dim)[None, :]
-
+    offs_kv = (my_batch_id*num_lookahead_tokens+my_token_id)*num_kv_heads*head_dim + (tl.arange(0, num_kv_heads)*head_dim)[:, None] + tl.arange(0, head_dim)[None, :]
+    offs_kvcache = (my_block_index*num_layers+cur_layer)*num_kv_heads*block_size*head_dim + \
+        (tl.arange(0, num_kv_heads)*block_size*head_dim)[:, None] + \
+            my_block_offset*head_dim + \
+                tl.arange(0, head_dim)[None, :]
     tl.store(k_cache + offs_kvcache, tl.load(k + offs_kv))
     tl.store(v_cache + offs_kvcache, tl.load(v + offs_kv))
 
@@ -109,7 +128,7 @@ def store_kvcache(
         )
 
     if infer_state.num_decoding_seqs > 0:
-        grid = (infer_state.num_decoding_seqs,)
+        grid = (infer_state.num_decoding_seqs,engine_config.num_lookahead_tokens)
         _fwd_kvcache_mgmt_decoding_kernel[grid](
             k_cache, v_cache,
             k[infer_state.num_prefill_tokens:, :, :],
@@ -118,15 +137,5 @@ def store_kvcache(
             infer_state.seq_ids[infer_state.num_prefill_seqs:],
             infer_state.decoding_seq_lens,
             cur_layer,
-            model_config.num_layers, model_config.num_kv_heads, engine_config.block_size, model_config.head_dim, engine_config.max_blocks_per_seq
+            model_config.num_layers, model_config.num_kv_heads, engine_config.block_size, model_config.head_dim, engine_config.max_blocks_per_seq,engine_config.num_lookahead_tokens
         )
-
-        # for my_batch_id in range(infer_state.num_decoding_seqs):
-        #     my_k = k[infer_state.num_prefill_tokens+my_batch_id]    # [num_kv_heads, head_dim]
-        #     my_v = v[infer_state.num_prefill_tokens+my_batch_id]    # [num_kv_heads, head_dim]
-        #     my_new_token_pos = infer_state.decoding_seq_lens[my_batch_id] - 1
-        #     my_block_index = block_table[infer_state.seq_ids[infer_state.num_prefill_seqs+my_batch_id]][my_new_token_pos // engine_config.block_size]
-        #     my_block_offset = my_new_token_pos % engine_config.block_size
-
-        #     k_cache[my_block_index][cur_layer][:, my_block_offset, :] = my_k
-        #     v_cache[my_block_index][cur_layer][:, my_block_offset, :] = my_v

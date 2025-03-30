@@ -5,6 +5,7 @@ from swiftllm.worker.weight import LlamaWeight
 from swiftllm.worker.kernels.rmsnorm import rmsnorm_inplace
 from swiftllm.worker.infer_state import LlamaInferState
 from swiftllm.worker.kernels.linear import linear
+from swiftllm.worker.output import ModelOutput
 
 class LlamaPostLayer:
     def __init__(
@@ -37,5 +38,14 @@ class LlamaPostLayer:
         )
         logits = linear(last_input, self.weights.lm_head)    # [batch_size, vocab_size]
         output_tokens = torch.argmax(logits, dim=1)
-        return output_tokens
+        # return output_tokens
+        return ModelOutput(
+            num_prefill_requests=infer_state.num_prefill_seqs,
+            prefill_logits=logits[:infer_state.num_prefill_seqs, :],
+            prefill_tokens=output_tokens[:infer_state.num_prefill_seqs],
+
+            num_decoding_requests=infer_state.num_decoding_seqs,
+            decoding_logits=logits[infer_state.num_prefill_seqs:, :],
+            decoding_tokens=output_tokens[infer_state.num_prefill_seqs:],
+        )
     

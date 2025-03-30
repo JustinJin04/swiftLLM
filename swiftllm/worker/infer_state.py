@@ -17,13 +17,15 @@ class LlamaInferState:
     max_prefill_len: int
 
     num_decoding_seqs: int
-    decoding_seq_lens: torch.Tensor # [batch_size]
+    # num_lookahead_tokens: int # default is 1 for decoding. for verification > 1
+    decoding_seq_lens: torch.Tensor # [batch_size], each including num_lookahead_tokens
     max_decoding_len: int
 
-    seq_block_size: int
-    num_seq_blocks: int
+    seq_chunk_size: int # a chunk of tokens grouped for paged_attention computation
+    num_seq_chunks: int 
 
     position_cos: torch.Tensor	# [num_tokens, hidden_size]
     position_sin: torch.Tensor	# [num_tokens, hidden_size]
 
     ignore_kvcache: bool    # Skip storing the key/value cache, useful when profiling the number of kv blocks
+

@@ -8,6 +8,7 @@ from swiftllm.model_config import LlamaModelConfig
 from swiftllm.worker.weight import load_weights
 from swiftllm.worker.block_manager import BlockManager
 from swiftllm.utils import GB
+from swiftllm.worker.output import ModelOutput
 import swiftllm_c
 
 from .layers.pre_layer import LlamaPreLayer
@@ -192,7 +193,7 @@ class LlamaModel:
         self,
         input_ids: torch.Tensor,    # [total_token_num]
         infer_state: LlamaInferState,
-    ) -> torch.Tensor:
+    ) -> ModelOutput:
         """
         Run a forward pass of the LlamaModel.
         """
@@ -208,8 +209,8 @@ class LlamaModel:
                 infer_state,
             )
         input_embds += residual_buf
-        output_tokens = self.post_layer.forward(input_embds, infer_state)
-        return output_tokens
+        model_output = self.post_layer.forward(input_embds, infer_state)
+        return model_output
     
     @torch.inference_mode()
     def forward(
@@ -218,7 +219,7 @@ class LlamaModel:
         seq_ids_list: list[int],     # [batch_size]
         decoding_seq_lens_list: list[int], # [num_decoding_seqs]
         ignore_kvcache: bool = False,   # Skip actions related to kv cache, useful when profiling the number of kv blocks
-    ) -> list[int]:
+    ) -> ModelOutput:
         """
         Run a forward pass of the LlamaModel.
 
@@ -246,7 +247,7 @@ class LlamaModel:
         decoding_seq_lens = torch.tensor(decoding_seq_lens_list, dtype=torch.int32, device="cuda")
         max_decoding_len = max(decoding_seq_lens_list) if decoding_seq_lens_list else 0
 
-        position_indices = torch.cat((
+        position_indices = torch.cat([
             torch.concat([
                 torch.arange(
                     0,
@@ -256,8 +257,15 @@ class LlamaModel:
                 )
                 for prefill_seq_len in prefill_seq_lens_list
             ]) if prefill_seq_lens_list else torch.empty(0, device="cuda", dtype=torch.int32),
-            decoding_seq_lens - 1
-        ), dim=0)
+            torch.concat([
+                torch.arange(
+                    decoding_seq_len-self.engine_config.num_lookahead_tokens,
+                    decoding_seq_len,
+                    device="cuda",
+                    dtype=torch.int32
+                ) for decoding_seq_len in decoding_seq_lens_list
+            ]) if decoding_seq_lens_list else torch.empty(0, device="cuda", dtype=torch.int32),
+        ], dim=0)
 
         if not ignore_kvcache:
             self.gpu_block_manager.allocate_blocks_for_seqs(
@@ -265,26 +273,26 @@ class LlamaModel:
                 seq_lengths
             )
 
-        # Select the seq_block_size
+        # Select the seq_chunk_size
         #
         # Here we use a simple heuristic:
         #
-        # In paged attention phase 1, the grid shape is (num_decoding_seqs, num_kv_heads, cdiv(max_decoding_len, seq_block_size))
-        # and among these blocks, num_kv_heads * sum(cdiv(decoding_seq_lens, seq_block_size)) blocks are useful.
-        # Thus we set seq_block_size to be the largest integer that satisfies
-        #      num_kv_heads * sum(cdiv(decoding_seq_lens, seq_block_size)) >= 1024
+        # In paged attention phase 1, the grid shape is (num_decoding_seqs, num_kv_heads, cdiv(max_decoding_len, seq_chunk_size))
+        # and among these blocks, num_kv_heads * sum(cdiv(decoding_seq_lens, seq_chunk_size)) blocks are useful.
+        # Thus we set seq_chunk_size to be the largest integer that satisfies
+        #      num_kv_heads * sum(cdiv(decoding_seq_lens, seq_chunk_size)) >= 1024
         # to fully utilize the GPU. Here 1024 is a magic number (since most high-end
         # GPUs have ~128 SMs, so ~512 SMSPs. Since the decoding-stage attention
         # is mostly a memory-bound operation, I think 1024 is a reasonable number.)
         #
-        # In practice, we use `decoding_seq_lens_sum/seq_block_size` to approximate
-        # sum(cdiv(decoding_seq_lens, seq_block_size))
+        # In practice, we use `decoding_seq_lens_sum/seq_chunk_size` to approximate
+        # sum(cdiv(decoding_seq_lens, seq_chunk_size))
 
-        seq_block_size = 2048
+        seq_chunk_size = 2048
         decoding_seq_lens_sum = sum(decoding_seq_lens_list)
-        while self.model_config.num_kv_heads*(decoding_seq_lens_sum/seq_block_size) < 1024 and seq_block_size//2 >= 64 and \
-            max_decoding_len / (seq_block_size//2) <= 128:
-            seq_block_size //= 2
+        while self.model_config.num_kv_heads*(decoding_seq_lens_sum/seq_chunk_size) < 1024 and seq_chunk_size//2 >= 64 and \
+            max_decoding_len / (seq_chunk_size//2) <= 128:
+            seq_chunk_size //= 2
 
         infer_state = LlamaInferState(
             batch_size = batch_size,
@@ -307,8 +315,8 @@ class LlamaModel:
             decoding_seq_lens = decoding_seq_lens,
             max_decoding_len = max_decoding_len,
 
-            seq_block_size = seq_block_size,
-            num_seq_blocks = (max_decoding_len + seq_block_size-1) // seq_block_size,
+            seq_chunk_size = seq_chunk_size,
+            num_seq_chunks = (max_decoding_len + seq_chunk_size-1) // seq_chunk_size,
 
             position_cos = self._cos_cached[position_indices],
             position_sin = self._sin_cached[position_indices],
@@ -319,7 +327,7 @@ class LlamaModel:
         return self._forward(
             torch.tensor(flattened_input_ids, dtype=torch.int32, device="cuda"),
             infer_state
-        ).tolist()
+        )
 
     def _swap(
         self,
