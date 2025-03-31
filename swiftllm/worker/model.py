@@ -302,7 +302,7 @@ class LlamaModel:
             softmax_scale = self.model_config.head_dim ** -0.5,
 
             num_prefill_seqs = num_prefill_seqs,
-            num_prefill_tokens = num_tokens - (batch_size - num_prefill_seqs),
+            num_prefill_tokens = num_tokens - (batch_size - num_prefill_seqs)*self.engine_config.num_lookahead_tokens,
             prefill_seq_start_locs = prefill_start_locs,
             prefill_seq_start_locs_with_end = torch.cat([
                 prefill_start_locs,

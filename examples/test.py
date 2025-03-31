@@ -1,5 +1,6 @@
 import time
 import argparse
+import numpy as np
 from transformers import AutoTokenizer
 
 import swiftllm
@@ -22,7 +23,7 @@ def main():
         use_dummy=False,
 
         block_size=16,
-        gpu_mem_utilization=0.99,
+        gpu_mem_utilization=0.5,
         num_cpu_blocks=0,
         max_seqs_in_block_table=128,
         max_blocks_per_seq=2048,
@@ -32,7 +33,7 @@ def main():
         max_tokens_in_batch=2048*4,
 
         # spec decoding
-        num_lookahead_tokens=1,
+        num_lookahead_tokens=2,
     )
 
     start_time = time.perf_counter()
@@ -52,7 +53,7 @@ def main():
     prompts = [
         "Life blooms like a flower, far away",
         "one two three four five",
-        "A B C D E F G H I J K L M N O P Q R S T U V",
+        "A B C D E F G H I J K L M N O P Q R",
         "To be or not to be,",
     ]
     outputs = []
@@ -66,20 +67,23 @@ def main():
         [],
     )
     outputs.append(prefill_outputs.prefill_tokens)
+    print(f"prefill: {tokenizer.decode(prefill_outputs.prefill_tokens)}")
 
     # decode
-    seq_lens = [len(x) for x in input_ids]
-    last_round_output = prefill_outputs.prefill_tokens
-    for _ in range(20):
-        for i, _ in enumerate(prompts):
-            seq_lens[i] += 1
-        decoding_outputs = model.forward(
-            [[x] for x in last_round_output],
-            seq_ids_list,
-            seq_lens,
-        )
-        last_round_output = decoding_outputs.decoding_tokens
-        outputs.append(last_round_output)
+    seq_lens = [len(x)+2 for x in input_ids]
+    lookahead_tokens = [
+        [515, 278],
+        [4832, 9881],
+        [317,323],
+        # [317],
+        [393,338],
+    ]
+    model_output = model.forward(
+        lookahead_tokens,
+        list(range(len(prompts))),
+        seq_lens,
+    )
+    outputs = list(np.array(model_output.decoding_tokens).reshape(len(prompts),2).transpose())
     
     for i, prompt in enumerate(prompts):
         output_tokens = [x[i] for x in outputs]

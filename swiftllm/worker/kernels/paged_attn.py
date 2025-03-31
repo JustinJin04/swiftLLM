@@ -20,6 +20,14 @@ def _fwd_paged_attention_phase1(
     num_seq_chunks: int,
     cur_layer: int,
 
+    # debug_acc: torch.Tensor, # [2][2][num_q_heads]
+    # debug_sum_exp: torch.Tensor, # [2][2][num_q_heads]
+    # debug_v_block: torch.Tensor,
+    # debug_exp_attn_score: torch.Tensor,
+    # debug_my_q: torch.Tensor,
+    # debug_attn_score: torch.Tensor,
+    # debug_new_max_score: torch.Tensor,
+
     num_layers: tl.constexpr,
     num_q_heads: tl.constexpr,
     num_kv_heads: tl.constexpr,
@@ -30,11 +38,13 @@ def _fwd_paged_attention_phase1(
     max_blocks_per_seq: tl.constexpr,
     num_lookahead_tokens: tl.constexpr,
 ):
-    # grid shape: [num_decoding_seqs, num_lookahead_tokens, num_q_heads, num_seq_chunks]
-    my_batch_id = tl.program_id(0).to(tl.int64)
+    # grid shape: [num_decoding_seqs*num_lookahead_tokens, num_q_heads, num_seq_chunks]
+    my_token_id = tl.program_id(0).to(tl.int64)
+    my_batch_id = my_token_id // num_lookahead_tokens
+    my_lookahead_token_id = my_token_id % num_lookahead_tokens
     my_q_head_id = tl.program_id(1).to(tl.int64)
     my_seq_chunk_id = tl.program_id(2)
-    my_lookahead_token_id = tl.program_id(3).to(tl.int64)
+
     my_kv_head_id = my_q_head_id // num_my_heads
 
     my_seq_id = tl.load(seq_ids + my_batch_id)
@@ -85,6 +95,18 @@ def _fwd_paged_attention_phase1(
             acc = acc*old_acc_scale + tl.sum(exp_attn_score[:, None]*v_block, axis=0)
             sum_exp = sum_exp*old_acc_scale + tl.sum(exp_attn_score, axis=0)
             max_score = new_max_score
+
+            # debug_offs = my_token_id*2*num_q_heads+block_i*num_q_heads+my_q_head_id
+            # tl.store(debug_acc+debug_offs, tl.sum(acc))
+            # tl.store(debug_sum_exp+debug_offs, sum_exp)
+            # tl.store(debug_exp_attn_score+debug_offs, tl.sum(exp_attn_score))
+            # tl.store(debug_my_q+debug_offs, tl.sum(my_q))
+            # tl.store(debug_attn_score+debug_offs, tl.sum(attn_score))
+            # tl.store(debug_new_max_score+debug_offs, new_max_score)
+
+            # debug_offs = debug_offs*block_size + tl.arange(0,block_size)
+            # tl.store(debug_v_block+debug_offs, tl.sum(v_block, axis=1))
+
     else:
         # The seq block I am processing is NOT the last one in the sequence
         for block_i in tl.static_range(0, seq_chunk_size // block_size):
@@ -126,8 +148,8 @@ def _fwd_paged_attention_phase2(
 ):
     # grid shape: [num_decoding_seqs, num_lookahead_tokens, num_q_heads]
     my_batch_id = tl.program_id(0)
-    my_q_head_id = tl.program_id(1)
-    my_lookahead_token_id = tl.program_id(2)
+    my_lookahead_token_id = tl.program_id(1)
+    my_q_head_id = tl.program_id(2)
 
     my_seq_len = tl.load(decoding_seq_lens + my_batch_id) - num_lookahead_tokens + my_lookahead_token_id + 1
     my_num_seq_chunks = tl.cdiv(my_seq_len, seq_chunk_size)
@@ -137,8 +159,8 @@ def _fwd_paged_attention_phase2(
     acc = tl.zeros([head_dim], dtype=tl.float32)
 
     for seq_chunk_id in range(my_num_seq_chunks):
-        offs_mid_o = ((my_batch_id*num_q_heads+my_q_head_id)*num_seq_chunks+seq_chunk_id)*head_dim + tl.arange(0, head_dim)
-        offs_mid_o_logexpsum = (my_batch_id*num_q_heads+my_q_head_id)*num_seq_chunks+seq_chunk_id
+        offs_mid_o = (((my_batch_id*num_lookahead_tokens+my_lookahead_token_id)*num_q_heads+my_q_head_id)*num_seq_chunks+seq_chunk_id)*head_dim + tl.arange(0, head_dim)
+        offs_mid_o_logexpsum = ((my_batch_id*num_lookahead_tokens+my_lookahead_token_id)*num_q_heads+my_q_head_id)*num_seq_chunks+seq_chunk_id
         cur_mid_o = tl.load(mid_o + offs_mid_o)   # [head_dim]
         cur_mid_o_logexpsum = tl.load(mid_o_logexpsum + offs_mid_o_logexpsum)
 
@@ -185,7 +207,17 @@ def paged_attention(
         infer_state.num_seq_chunks
     ), device=q.device, dtype=torch.float32)
 
-    grid = (infer_state.num_decoding_seqs, engine_config.num_lookahead_tokens, model_config.num_q_heads, infer_state.num_seq_chunks)
+    # print(f"before phase1: num_seq_chunks={infer_state.num_seq_chunks}")
+    # debug_acc = torch.empty((2,2,model_config.num_q_heads),device=q.device, dtype=torch.float16)
+    # debug_sum_exp = torch.empty((2,2,model_config.num_q_heads),device=q.device, dtype=torch.float16)
+    # debug_exp_attn_score = torch.empty((2,2,model_config.num_q_heads),device=q.device, dtype=torch.float16)
+    # debug_my_q = torch.empty((2,2,model_config.num_q_heads),device=q.device, dtype=torch.float16)
+    # debug_attn_score = torch.empty((2,2,model_config.num_q_heads),device=q.device, dtype=torch.float16)
+    # debug_new_max_score = torch.empty((2,2,model_config.num_q_heads),device=q.device, dtype=torch.float16)
+
+    # debug_v_block = torch.empty((2,2,model_config.num_q_heads, 16),device=q.device, dtype=torch.float16)
+
+    grid = (infer_state.num_decoding_seqs*engine_config.num_lookahead_tokens, model_config.num_q_heads, infer_state.num_seq_chunks)
     _fwd_paged_attention_phase1[grid](
         mid_o, mid_o_logexpsum,
         q, k_cache, v_cache,
@@ -204,6 +236,14 @@ def paged_attention(
         infer_state.num_seq_chunks,
         cur_layer,
 
+        # debug_acc,
+        # debug_sum_exp,
+        # debug_v_block,
+        # debug_exp_attn_score,
+        # debug_my_q,
+        # debug_attn_score,
+        # debug_new_max_score,
+
         model_config.num_layers,
         model_config.num_q_heads,
         model_config.num_kv_heads,
@@ -212,9 +252,23 @@ def paged_attention(
         model_config.head_dim,
         infer_state.seq_chunk_size,
         engine_config.max_blocks_per_seq,
+        engine_config.num_lookahead_tokens,
         num_warps = 1,
-        num_stages = 4
+        num_stages = 4,
     )
+    # if engine_config.num_lookahead_tokens == 1:
+    #     print(f"debug page_attn mid_o: {mid_o[0].sum()}")
+    #     print(f"debug page_attn mid_o_logexpsum: {mid_o_logexpsum[0].sum()}")
+    # elif engine_config.num_lookahead_tokens == 2:
+    #     print(f"debug page_attn mid_o: {mid_o[0].sum()}\n{mid_o[1].sum()}")
+    #     print(f"debug page_attn mid_o_logexpsum: {mid_o_logexpsum[0].sum()}\n{mid_o_logexpsum[1].sum()}")
+    #     print(f"debug_acc: {debug_acc.sum(axis=2)}")
+    #     print(f"debug_sum_exp: {debug_sum_exp.sum(axis=2)}")
+    #     print(f"debug_v_block: {debug_v_block.sum(axis=2)}")
+    #     print(f"debug_exp_attn_score: {debug_exp_attn_score.sum(axis=2)}")
+    #     print(f"debug_my_q: {debug_my_q.sum(axis=2)}")
+    #     print(f"debug_attn_score: {debug_attn_score.sum(axis=2)}")
+    #     print(f"debug_new_max_score: {debug_new_max_score.sum(axis=2)}")
 
     grid = (infer_state.num_decoding_seqs, engine_config.num_lookahead_tokens, model_config.num_q_heads)
     _fwd_paged_attention_phase2[grid](
@@ -225,4 +279,5 @@ def paged_attention(
         model_config.head_dim,
         infer_state.num_seq_chunks,
         infer_state.seq_chunk_size,
+        engine_config.num_lookahead_tokens,
     )

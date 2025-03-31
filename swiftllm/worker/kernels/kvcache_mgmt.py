@@ -83,10 +83,10 @@ def _fwd_kvcache_mgmt_decoding_kernel(
     my_batch_id = tl.program_id(0).to(tl.int64)
     my_token_id = tl.program_id(1).to(tl.int64)
     my_seq_id = tl.load(decoding_seq_ids + my_batch_id)
-    my_seq_len = tl.load(decoding_seq_lens + my_batch_id)
+    my_seq_len = tl.load(decoding_seq_lens + my_batch_id) - num_lookahead_tokens + my_token_id + 1
 
-    my_block_id = (my_seq_len-num_lookahead_tokens+my_token_id) // block_size
-    my_block_offset = (my_seq_len-num_lookahead_tokens+my_token_id) % block_size
+    my_block_id = (my_seq_len-1) // block_size
+    my_block_offset = (my_seq_len-1) % block_size
     my_block_index = tl.load(block_table + my_seq_id*max_blocks_per_seq + my_block_id).to(tl.int64)
 
     offs_kv = (my_batch_id*num_lookahead_tokens+my_token_id)*num_kv_heads*head_dim + (tl.arange(0, num_kv_heads)*head_dim)[:, None] + tl.arange(0, head_dim)[None, :]
@@ -128,7 +128,7 @@ def store_kvcache(
         )
 
     if infer_state.num_decoding_seqs > 0:
-        grid = (infer_state.num_decoding_seqs,engine_config.num_lookahead_tokens)
+        grid = (infer_state.num_decoding_seqs, engine_config.num_lookahead_tokens)
         _fwd_kvcache_mgmt_decoding_kernel[grid](
             k_cache, v_cache,
             k[infer_state.num_prefill_tokens:, :, :],
