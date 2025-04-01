@@ -11,3 +11,7 @@ class ModelOutput:
     decoding_logits: Tensor # [num_decoding_requests*num_lookahead_tokens, vocab_size]
     decoding_tokens: list[int] # [num_decoding_requests*num_lookahead_tokens]
 
+@dataclasses.dataclass
+class SpecWorkerOutput:
+    final_output_ids: list[int]
+    num_accepted_tokens_list: list[int]

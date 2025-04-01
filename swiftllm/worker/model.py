@@ -61,7 +61,7 @@ class LlamaModel:
         self.cpu_block_manager = self.gpu_block_manager = None
         
     @torch.inference_mode()
-    def load_weights(self):
+    def _load_weights(self):
         """
         Load weights and initialize layers
         """
@@ -92,7 +92,7 @@ class LlamaModel:
         self.post_layer = LlamaPostLayer(self.model_config, self.weight)
 
     @torch.inference_mode()
-    def profile_num_blocks(self) -> int:
+    def _profile_num_blocks(self, original_peak_memory) -> int:
         """
         Profiler the number of GPU blocks
 
@@ -122,17 +122,17 @@ class LlamaModel:
         free_memory, total_memory = torch.cuda.mem_get_info()
         peak_memory = total_memory - free_memory
         useable_memory = total_memory*self.engine_config.gpu_mem_utilization
-        print(f"[Model.profile] GPU total memory: {total_memory/GB:.2f} GB, runtime peak memory: {peak_memory/GB:.2f} GB")
-        if useable_memory < peak_memory:
-            raise RuntimeError(f"Peak memory {peak_memory/GB:.2f} GB exceeds usable memory {useable_memory/GB:.2f} GB ({total_memory/GB:.2f} GB * {self.engine_config.gpu_mem_utilization})")
+        print(f"[Model.profile] GPU total memory: {total_memory/GB:.2f} GB, useable memory: {useable_memory/GB:.2f} GB, runtime peak memory: {(peak_memory-original_peak_memory)/GB:.2f} GB")
+        if useable_memory < (peak_memory-original_peak_memory):
+            raise RuntimeError(f"Peak memory {(peak_memory-original_peak_memory)/GB:.2f} GB exceeds usable memory {useable_memory/GB:.2f} GB ({total_memory/GB:.2f} GB * {self.engine_config.gpu_mem_utilization})")
         block_size_bytes = self.engine_config.block_size * self.model_config.get_kvslot_size()
-        num_gpu_blocks = math.floor((useable_memory - peak_memory) / block_size_bytes)
+        num_gpu_blocks = math.floor((useable_memory - (peak_memory-original_peak_memory)) / block_size_bytes)
 
         torch.cuda.empty_cache()
         return num_gpu_blocks
     
     @torch.inference_mode()
-    def init_kvcache_and_swap(self, num_blocks: int):
+    def _init_kvcache_and_swap(self, num_blocks: int):
         self.num_blocks = num_blocks
 
         # Initialize KV cache
@@ -174,6 +174,25 @@ class LlamaModel:
             self.engine_config.max_blocks_per_seq,
             self.engine_config.block_size
         )
+
+    @torch.inference_mode()
+    def load_weight_and_init_kvcache(self):
+        """
+        Load weights and initialize KV cache
+        """
+        torch.cuda.empty_cache()
+        torch.cuda.reset_peak_memory_stats()
+        free_memory, total_memory = torch.cuda.mem_get_info()
+        original_peak_memory = total_memory - free_memory
+        
+        # load model weights
+        self._load_weights()
+
+        # profile the number of blocks
+        num_gpu_blocks = self._profile_num_blocks(original_peak_memory)
+
+        # Initialize KV cache
+        self._init_kvcache_and_swap(num_gpu_blocks)
 
     def _init_to_get_rotary(self):
         rope_scaling_factor = self.model_config.rope_scaling
@@ -328,6 +347,35 @@ class LlamaModel:
             torch.tensor(flattened_input_ids, dtype=torch.int32, device="cuda"),
             infer_state
         )
+
+    @torch.inference_mode()
+    def prefill(
+        self,
+        input_ids: list[int],
+    ):
+        return self.forward(
+            [input_ids],
+            [0],
+            [],
+        )
+
+    @torch.inference_mode()
+    def decode(
+        self,
+        input_ids: list[int],
+        seq_len: int,
+    ):
+        '''
+        for examples: one two three | four five
+        model.prefill([one, two, three])
+        model.decode([four, five], 5)
+        '''
+        return self.forward(
+            [input_ids],
+            [0],
+            [seq_len],
+        )
+
 
     def _swap(
         self,

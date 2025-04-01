@@ -9,3 +9,5 @@ from swiftllm.server.structs import RawRequest
 from swiftllm.worker.model import LlamaModel
 
 from swiftllm.worker.output import ModelOutput
+
+from swiftllm.worker.specdec import SpecDecWorker

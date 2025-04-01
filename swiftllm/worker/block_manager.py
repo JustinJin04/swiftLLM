@@ -67,14 +67,17 @@ class BlockManager:
         Return new blocks allocated for the sequences. (useful for swapping)
         """
         target_num_blocks = (target_lens + (self.block_size-1)) // self.block_size
-        assert (self.num_seq_allocated_blocks[seq_ids] <= target_num_blocks).all(), \
-            f"""(On {self.device_name}) Logic error: Some sequences have more blocks already allocated than needed.
-                seq_ids: {seq_ids}, target_lens: {target_lens}, target_num_blocks: {target_num_blocks},
-                self.num_seq_allocated_blocks[seq_ids]: {self.num_seq_allocated_blocks[seq_ids]}"""
-        block_needed = target_num_blocks - self.num_seq_allocated_blocks[seq_ids]
+        # assert (self.num_seq_allocated_blocks[seq_ids] <= target_num_blocks).all(), \
+        #     f"""(On {self.device_name}) Logic error: Some sequences have more blocks already allocated than needed.
+        #         seq_ids: {seq_ids}, target_lens: {target_lens}, target_num_blocks: {target_num_blocks},
+        #         self.num_seq_allocated_blocks[seq_ids]: {self.num_seq_allocated_blocks[seq_ids]}"""
+        
+        need_alloc_seq_ids = seq_ids[target_num_blocks > self.num_seq_allocated_blocks[seq_ids]]
+
+        block_needed = target_num_blocks - self.num_seq_allocated_blocks[need_alloc_seq_ids]
         new_blocks = self._allocate_blocks(torch.sum(block_needed))
 
-        set_block_table_and_num_seq_alloc_blocks(self.num_seq_allocated_blocks, self.block_table, new_blocks, seq_ids, block_needed)
+        set_block_table_and_num_seq_alloc_blocks(self.num_seq_allocated_blocks, self.block_table, new_blocks, need_alloc_seq_ids, block_needed)
 
         return new_blocks
         
