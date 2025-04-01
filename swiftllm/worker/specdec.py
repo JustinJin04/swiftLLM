@@ -42,6 +42,7 @@ class SpecDecWorker:
     def forward(
         self,
         input_ids: list[int],
+        num_max_tokens_to_generate: int = 10,
     )->SpecWorkerOutput:
         target_prefill_output = self.target.prefill(
             input_ids,
@@ -57,7 +58,7 @@ class SpecDecWorker:
         verify_input_ids = [target_prefill_output.prefill_tokens[0]]
         draft_input_id = draft_prefill_output.prefill_tokens[0]
         draft_seq_len = len(input_ids)
-        for _ in range(10):
+        while True:
             for i in range(self.num_lookahead_tokens-1):
                 draft_seq_len += 1
                 draft_output = self.drafter.decode(
@@ -67,7 +68,7 @@ class SpecDecWorker:
                 draft_input_id = draft_output.decoding_tokens[0]
                 verify_input_ids.append(draft_input_id)
             
-            print(f"> draft tokens: {self.tokenizer.decode(final_output_ids+verify_input_ids[1:], skip_special_tokens=True)}")
+            # print(f"[SpecDecWorker.draft] {self.tokenizer.decode(final_output_ids+verify_input_ids[1:], skip_special_tokens=True)}")
             
             # verify phase
             verify_output = self.target.decode(
@@ -86,7 +87,9 @@ class SpecDecWorker:
 
             final_output_ids.extend(verify_output.decoding_tokens[:num_accepted_tokens+1])
             num_accepted_tokens_list.append(num_accepted_tokens)
-            print(f"> after verify: {self.tokenizer.decode(final_output_ids, skip_special_tokens=True)}")
+            # print(f"[SpecDecWorker.verify] {self.tokenizer.decode(final_output_ids, skip_special_tokens=True)}")
+            if len(final_output_ids) >= num_max_tokens_to_generate:
+                break
                 
         
         return SpecWorkerOutput(

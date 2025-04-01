@@ -40,10 +40,10 @@ class LlamaModelConfig:
         elif(isinstance(self.rope_scaling, dict)):
             print(f"Warning: how to deal with the rope_scaling as a dict??")
             print(self.rope_scaling)
-            self.rope_scaling = self.rope_scaling["factor"]
+            # self.rope_scaling = self.rope_scaling["factor"]
         
         self.tie_word_embeddings = model_config.get("tie_word_embeddings", False)
-        assert self.tie_word_embeddings == False, "currently we don't support tying lm_head with wte"
+        # assert self.tie_word_embeddings == False, "currently we don't support tying lm_head with wte"
         
 
     def get_kvslot_size(self, dtype: torch.dtype = torch.float16) -> int:

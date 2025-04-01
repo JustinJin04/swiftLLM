@@ -149,12 +149,20 @@ class LlamaWeight(WeightBase):
             (self.model_config.vocab_size, self.model_config.hidden_size),
             self.dtype
         ))
-        self.register_weight(RegisteredWeightItem(
-            "lm_head",
-            "lm_head.weight",
-            (self.model_config.vocab_size, self.model_config.hidden_size),
-            self.dtype
-        ))
+        if self.model_config.tie_word_embeddings:
+            self.register_weight(RegisteredWeightItem(
+                "lm_head",
+                "model.embed_tokens.weight",
+                (self.model_config.vocab_size, self.model_config.hidden_size),
+                self.dtype
+            ))
+        else:
+            self.register_weight(RegisteredWeightItem(
+                "lm_head",
+                "lm_head.weight",
+                (self.model_config.vocab_size, self.model_config.hidden_size),
+                self.dtype
+            ))
         self.register_weight(RegisteredWeightItem(
             "final_norm",
             "model.norm.weight",

@@ -35,7 +35,7 @@ def main():
 
         # The following are not used in the offline example
         max_batch_size=1,
-        max_tokens_in_batch=2048*1,
+        max_tokens_in_batch=2048,
 
         # spec decoding
         num_lookahead_tokens=10,
@@ -52,7 +52,7 @@ def main():
 
         # The following are not used in the offline example
         max_batch_size=1,
-        max_tokens_in_batch=2048*1,
+        max_tokens_in_batch=2048,
 
         # spec decoding
         num_lookahead_tokens=1,
@@ -65,15 +65,27 @@ def main():
     
     tokenizer = AutoTokenizer.from_pretrained(args.target_path)
     
-    prompt = "1 2 3 4 5 6 7 8 9"
+    prompt = str(np.arange(1000).tolist())
     input_ids = tokenizer(prompt)['input_ids']
-    spec_output = spec_worker.forward(
-        input_ids,
-    )
 
-    output_text = tokenizer.decode(spec_output.final_output_ids, skip_special_tokens=True)
-    print(f"{prompt}|{output_text}")
-    print(f"accepted tokens list: {spec_output.num_accepted_tokens_list}")
+    # warmup
+    for _ in range(2):
+        spec_output = spec_worker.forward(
+            input_ids,
+            num_max_tokens_to_generate=1000,
+        )
+    
+    # timing
+    start_time = time.perf_counter()
+    rounds = 5
+    for _ in range(rounds):
+        spec_worker.forward(
+            input_ids,
+            num_max_tokens_to_generate=1000,
+        )
+    end_time = time.perf_counter()
+    print(f"SpecDecoding time: {(end_time-start_time)/rounds:.2f} seconds")
+    print(f"Accepted tokens list: {spec_output.num_accepted_tokens_list}")
 
 if __name__ == "__main__":
     main()

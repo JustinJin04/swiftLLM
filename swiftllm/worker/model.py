@@ -195,12 +195,26 @@ class LlamaModel:
         self._init_kvcache_and_swap(num_gpu_blocks)
 
     def _init_to_get_rotary(self):
-        rope_scaling_factor = self.model_config.rope_scaling
         base = self.model_config.rope_theta
-        max_position_embeddings = self.model_config.max_position_embeddings
-        max_seq_len = max_position_embeddings * rope_scaling_factor
+        dim_range = torch.arange(0, self.model_config.head_dim, 2, device="cuda", dtype=torch.float32)
+        inv_freq = 1.0 / (base ** (dim_range / self.model_config.head_dim))
 
-        inv_freq = 1.0 / (base ** (torch.arange(0, self.model_config.head_dim, 2, device="cuda", dtype=torch.float32) / self.model_config.head_dim))
+        if isinstance(self.model_config.rope_scaling, dict):
+            rope_scaling_factor = self.model_config.rope_scaling["factor"]
+            max_position_embeddings = self.model_config.rope_scaling["original_max_position_embeddings"]
+            
+            high_freq_factor = self.model_config.rope_scaling["high_freq_factor"]
+            low_freq_factor = self.model_config.rope_scaling["low_freq_factor"]
+            # Determine interpolation (scaling) for frequencies
+            # Linearly interpolate between high_freq_factor (for highest frequencies) and low_freq_factor (for lowest frequencies)
+            scale_factors = torch.linspace(high_freq_factor, low_freq_factor, inv_freq.shape[0], device="cuda", dtype=torch.float32)
+            inv_freq = inv_freq * scale_factors
+        else:
+            rope_scaling_factor = self.model_config.rope_scaling
+            max_position_embeddings = self.model_config.max_position_embeddings
+
+        max_seq_len = int(max_position_embeddings * rope_scaling_factor)
+        # Adjust position embedding accordingly
         t = torch.arange(max_seq_len + 128, device="cuda", dtype=torch.float32) / rope_scaling_factor
         freqs = torch.outer(t, inv_freq)
 
@@ -352,7 +366,7 @@ class LlamaModel:
     def prefill(
         self,
         input_ids: list[int],
-    ):
+    )->ModelOutput:
         return self.forward(
             [input_ids],
             [0],
@@ -376,6 +390,29 @@ class LlamaModel:
             [seq_len],
         )
 
+
+    @torch.inference_mode()
+    def prefill_decode(
+        self,
+        input_ids: list[int],
+        num_max_tokens_to_generate: int = 10,
+    )->list[int]:
+        prefill_output = self.prefill(input_ids)
+        final_output_ids = [prefill_output.prefill_tokens[0]]
+        input_id = prefill_output.prefill_tokens[0]
+        input_seq_len = len(input_ids)
+        while True:
+            input_seq_len += 1
+            decoding_output = self.decode(
+                [input_id],
+                input_seq_len,
+            )
+            input_id = decoding_output.decoding_tokens[0]
+            final_output_ids.append(input_id)
+            if len(final_output_ids) >= num_max_tokens_to_generate:
+                break
+        
+        return final_output_ids
 
     def _swap(
         self,
