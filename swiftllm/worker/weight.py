@@ -202,9 +202,11 @@ class MarlinWeights:
             self.outfeatures,
             groupsize=self.groupsize
         ).to(self.B.device)  # <-- move the entire layer to the correct device
-
-        layer.B.copy_(self.B)
-        layer.s.copy_(self.s)
+        
+        # layer.B.copy_(self.B)
+        setattr(layer, "B", torch.nn.Parameter(self.B, requires_grad=False))
+        # layer.s.copy_(self.s)
+        setattr(layer, "s", torch.nn.Parameter(self.s, requires_grad=False))
         assert layer.B.device == self.B.device
         return layer
 
@@ -229,12 +231,14 @@ class LlamaTransformerLayerWeightMarlin(WeightBase):
         
         self.register_weight(RegisteredWeightItem(
             f"{attr_name}_B",
+            # f"{key}.qweight",
             f"{key}.B",
             (infeatures // 16, outfeatures*2),
             torch.int32
         ))
         self.register_weight(RegisteredWeightItem(
             f"{attr_name}_s",
+            # f"{key}.scales",
             f"{key}.s",
             (infeatures // groupsize, outfeatures),
             torch.float16

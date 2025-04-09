@@ -252,6 +252,7 @@ class LlamaTransformerLayerMarlin:
         gate = self.weight.gate_proj(o)
         up_gate_proj = torch.cat([up, gate], dim=1)
         silu_and_mul_inplace(up_gate_proj)
+        up_gate_proj = up_gate_proj[:, :self.model_config.ffn_inter_dim].contiguous()
         ffn_out = self.weight.down_proj(up_gate_proj[:, :self.model_config.ffn_inter_dim])
 
         return ffn_out

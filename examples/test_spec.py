@@ -45,7 +45,7 @@ def main():
         use_dummy=False,
 
         block_size=16,
-        gpu_mem_utilization=0.2,
+        gpu_mem_utilization=0.9,
         num_cpu_blocks=0,
         max_seqs_in_block_table=4,
         max_blocks_per_seq=2048,
@@ -69,6 +69,7 @@ def main():
     input_ids = tokenizer(prompt)['input_ids']
     spec_output = spec_worker.forward(
         input_ids,
+        num_max_tokens_to_generate=100,
     )
 
     output_text = tokenizer.decode(spec_output.final_output_ids, skip_special_tokens=True)
@@ -77,6 +78,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-        
-    

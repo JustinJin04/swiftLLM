@@ -20,6 +20,9 @@ class SpecDecWorker:
         model_creation_time = time.perf_counter() - start_time
         print(f"Draft Model creation time: {model_creation_time:.2f} seconds")
 
+        assert self.target.model_config.vocab_size == self.drafter.model_config.vocab_size, \
+            f"Vocab size mismatch. target={self.target.model_config.vocab_size}, while drafter={self.drafter.model_config.vocab_size}"
+
         self.num_lookahead_tokens = target_engine_config.num_lookahead_tokens
 
         # used for debugging
@@ -68,7 +71,7 @@ class SpecDecWorker:
                 draft_input_id = draft_output.decoding_tokens[0]
                 verify_input_ids.append(draft_input_id)
             
-            # print(f"[SpecDecWorker.draft] {self.tokenizer.decode(final_output_ids+verify_input_ids[1:], skip_special_tokens=True)}")
+            print(f"[SpecDecWorker.draft] {self.tokenizer.decode(final_output_ids+verify_input_ids[1:], skip_special_tokens=True)}")
             
             # verify phase
             verify_output = self.target.decode(
@@ -87,7 +90,7 @@ class SpecDecWorker:
 
             final_output_ids.extend(verify_output.decoding_tokens[:num_accepted_tokens+1])
             num_accepted_tokens_list.append(num_accepted_tokens)
-            # print(f"[SpecDecWorker.verify] {self.tokenizer.decode(final_output_ids, skip_special_tokens=True)}")
+            print(f"[SpecDecWorker.verify] {self.tokenizer.decode(final_output_ids, skip_special_tokens=True)}")
             if len(final_output_ids) >= num_max_tokens_to_generate:
                 break
                 

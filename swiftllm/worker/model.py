@@ -62,7 +62,7 @@ class LlamaModelBase:
         self._init_to_get_rotary()
 
     @torch.inference_mode()
-    def _profile_num_blocks(self, original_peak_memory) -> int:
+    def _profile_num_blocks(self, usable_memory, total_free_memory) -> int:
         """
         Profiler the number of GPU blocks
 
@@ -90,13 +90,18 @@ class LlamaModelBase:
         # peak_memory = torch.cuda.max_memory_allocated()
         # total_memory = torch.cuda.get_device_properties(0).total_memory
         free_memory, total_memory = torch.cuda.mem_get_info()
-        peak_memory = total_memory - free_memory
-        useable_memory = total_memory*self.engine_config.gpu_mem_utilization
-        print(f"[Model.profile] GPU total memory: {total_memory/GB:.2f} GB, useable memory: {useable_memory/GB:.2f} GB, runtime peak memory: {(peak_memory-original_peak_memory)/GB:.2f} GB")
-        if useable_memory < (peak_memory-original_peak_memory):
-            raise RuntimeError(f"Peak memory {(peak_memory-original_peak_memory)/GB:.2f} GB exceeds usable memory {useable_memory/GB:.2f} GB ({total_memory/GB:.2f} GB * {self.engine_config.gpu_mem_utilization})")
+        peak_memory_wo_kvcache = total_free_memory - free_memory
+        cache_block_memory = usable_memory - peak_memory_wo_kvcache
+        print(f"[Model.profile] GPU "
+              f"total free memory: {total_free_memory/GB:.2f} GB, "
+              f"useable memory: {usable_memory/GB:.2f} GB, "
+              f"runtime peak memory wo kvcache: {peak_memory_wo_kvcache/GB:.2f} GB, "
+              f"cache block memory: {cache_block_memory/GB:.2f} GB, "
+              )
+        if usable_memory < peak_memory_wo_kvcache:
+            raise RuntimeError(f"Peak memory {peak_memory_wo_kvcache/GB:.2f} GB exceeds usable memory {usable_memory/GB:.2f} GB ({total_free_memory/GB:.2f} GB * {self.engine_config.gpu_mem_utilization})")
         block_size_bytes = self.engine_config.block_size * self.model_config.get_kvslot_size()
-        num_gpu_blocks = math.floor((useable_memory - (peak_memory-original_peak_memory)) / block_size_bytes)
+        num_gpu_blocks = math.floor(cache_block_memory / block_size_bytes)
 
         torch.cuda.empty_cache()
         return num_gpu_blocks
@@ -153,13 +158,13 @@ class LlamaModelBase:
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats()
         free_memory, total_memory = torch.cuda.mem_get_info()
-        original_peak_memory = total_memory - free_memory
+        usable_memory = free_memory * self.engine_config.gpu_mem_utilization # including weights and kv cache
         
         # load model weights
         self._load_weights()
 
         # profile the number of blocks
-        num_gpu_blocks = self._profile_num_blocks(original_peak_memory)
+        num_gpu_blocks = self._profile_num_blocks(usable_memory, free_memory)
 
         # Initialize KV cache
         self._init_kvcache_and_swap(num_gpu_blocks)
@@ -457,16 +462,25 @@ class LlamaModel(LlamaModelBase):
     - call load_weights()
     - call profile_num_blocks() on one worker
     - call init_kvcache_and_swap()
+
+    4/9/2025 Update: support marlin model
     """
-        
+
     @torch.inference_mode()
     def _load_weights(self):
         """
         Load weights and initialize layers
+
+        For quantized/non-quantized model, the only difference is the transformer layer
         """
         
-        assert self.model_config.quantization_config is None, "LlamaModel is not a quantized model. Use LlamaModelMarlin instead."
-        
+        assert self.model_config.quantization_config is None or \
+        (
+            self.model_config.quantization_config["quant_method"] == "marlin" and \
+            self.model_config.quantization_config["group_size"] == 128
+        )
+        use_marlin = True if self.model_config.quantization_config else False
+
         # Initialize rotary embeddings
         super()._load_weights()
         
@@ -488,35 +502,7 @@ class LlamaModel(LlamaModelBase):
                 self.weight.layers[layer_id],
                 decoding_piggyback_stream,
                 layer_id
-            )
-            for layer_id in range(self.model_config.num_layers)
-        ]
-        self.post_layer = LlamaPostLayer(self.model_config, self.weight)
-
-class LlamaModelMarlin(LlamaModelBase):       
-    @torch.inference_mode()
-    def _load_weights(self):
-        """
-        Load weights and initialize layers
-        """
-
-        assert self.model_config.quantization_config is not None, "LlamaModelMarlin is a quantized model. Use LlamaModel instead."
-
-        # Initialize rotary embeddings
-        super()._load_weights()
-        
-        # Load weights
-        self.weight = load_weights(
-            self.model_config,
-            torch.float16,
-            self.engine_config.model_path,
-            self.engine_config.use_dummy
-        )
-
-        # Initialize layers
-        decoding_piggyback_stream = torch.cuda.Stream()
-        self.pre_layer = LlamaPreLayer(self.model_config, self.weight)
-        self.transformer_layers = [
+            ) if not use_marlin else \
             LlamaTransformerLayerMarlin(
                 self.model_config,
                 self.engine_config,
@@ -527,6 +513,3 @@ class LlamaModelMarlin(LlamaModelBase):
             for layer_id in range(self.model_config.num_layers)
         ]
         self.post_layer = LlamaPostLayer(self.model_config, self.weight)
-
-        
-
