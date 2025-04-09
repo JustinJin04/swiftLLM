@@ -1,8 +1,11 @@
 import json
 import os
 import dataclasses
+from typing import Union
+
 import torch
 import safetensors
+import marlin
 
 from swiftllm.model_config import LlamaModelConfig
 
@@ -98,7 +101,6 @@ class LlamaTransformerLayerWeight(WeightBase):
             (self.model_config.hidden_size, self.model_config.hidden_size),
             self.dtype
         ))
-
         self.register_weight(RegisteredWeightItem(
             "ffn_norm",
             f"model.layers.{self.layer_id}.post_attention_layernorm.weight",
@@ -179,13 +181,221 @@ class LlamaWeight(WeightBase):
         for layer in self.layers:
             layer.load_weights(getter)
 
+import torch
+import dataclasses
+from typing import Tuple
+
+@dataclasses.dataclass
+class MarlinWeights:
+    groupsize: int
+    B: torch.Tensor # [infeatures // 16, outfeatures*2]
+    s: torch.Tensor # [infeatures // groupsize, outfeatures]
+
+    @property
+    def infeatures(self) -> int:
+        return self.s.shape[0] * self.groupsize
+    @property
+    def outfeatures(self) -> int:
+        return self.s.shape[1]
+
+    def convert_to_marlin_layer(self) -> 'marlin.Layer':
+        """Convert to optimized Marlin format"""
+
+        layer = marlin.Layer(
+            self.infeatures, 
+            self.outfeatures,
+            groupsize=self.groupsize
+        )
+        layer.B = self.B
+        layer.s = self.s
+        return layer
+
+
+class LlamaTransformerLayerWeightMarlin(WeightBase):
+
+    def _register_quant_weight(
+        self, 
+        attr_name: str, 
+        key: str, 
+        shape: tuple,
+        dtype: torch.dtype,
+    ):
+        """
+        register all tensors that are related to each weight. For examples:
+        B: torch.Tensor # [infeatures // 16, outfeatures*2], int32
+        s: torch.Tensor # [infeatures // groupsize, outfeatures], float16
+        """
+        infeatures, outfeatures = shape
+        groupsize = self.model_config.quantization_config["group_size"]
+        assert groupsize == 128
+        
+        self.register_weight(RegisteredWeightItem(
+            f"{attr_name}_B",
+            f"{key}.B",
+            (infeatures // 16, outfeatures*2),
+            torch.int32
+        ))
+        self.register_weight(RegisteredWeightItem(
+            f"{attr_name}_s",
+            f"{key}.s",
+            (infeatures // groupsize, outfeatures),
+            torch.float16
+        ))
+        self.quant_weight_name_list.append(attr_name)
+
+
+    def __init__(
+        self,
+        layer_id: int,
+        model_config: LlamaModelConfig,
+        dtype: torch.dtype,
+    ):
+        super().__init__()
+
+        self.layer_id = layer_id
+        self.model_config = model_config
+        self.dtype = dtype
+
+        self.quant_weight_name_list: list[str] = []
+
+        self.register_weight(RegisteredWeightItem(
+            "attn_norm",
+            f"model.layers.{self.layer_id}.input_layernorm.weight",
+            (self.model_config.hidden_size,),
+            self.dtype
+        ))
+        self.register_weight(RegisteredWeightItem(
+            "ffn_norm",
+            f"model.layers.{self.layer_id}.post_attention_layernorm.weight",
+            (self.model_config.hidden_size,),
+            self.dtype
+        ))
+        self._register_quant_weight(
+            "q_proj",
+            f"model.layers.{self.layer_id}.self_attn.q_proj",
+            (self.model_config.hidden_size, self.model_config.hidden_size),
+            self.dtype
+        )
+        self._register_quant_weight(
+            "k_proj",
+            f"model.layers.{self.layer_id}.self_attn.k_proj.weight",
+            (self.model_config.num_kv_heads*self.model_config.head_dim, self.model_config.hidden_size),
+            self.dtype
+        )
+        self._register_quant_weight(
+            "v_proj",
+            f"model.layers.{self.layer_id}.self_attn.v_proj.weight",
+            (self.model_config.num_kv_heads*self.model_config.head_dim, self.model_config.hidden_size),
+            self.dtype
+        )
+        self._register_quant_weight(
+            "o_proj",
+            f"model.layers.{self.layer_id}.self_attn.o_proj.weight",
+            (self.model_config.hidden_size, self.model_config.hidden_size),
+            self.dtype
+        )
+        self._register_quant_weight(
+            "up_proj",
+            f"model.layers.{self.layer_id}.mlp.up_proj.weight",
+            (self.model_config.ffn_inter_dim, self.model_config.hidden_size),
+            self.dtype
+        )
+        self._register_quant_weight(
+            "gate_proj",
+            f"model.layers.{self.layer_id}.mlp.gate_proj.weight",
+            (self.model_config.ffn_inter_dim, self.model_config.hidden_size),
+            self.dtype
+        )
+        self._register_quant_weight(
+            "down_proj",
+            f"model.layers.{self.layer_id}.mlp.down_proj.weight",
+            (self.model_config.hidden_size, self.model_config.ffn_inter_dim),
+            self.dtype
+        )
+
+
+    def _post_process_after_load(self, getter):
+        """
+        1. convert quant weight to fp16
+        2. pack to marlin layer and store the B and s
+        3. delete useless weights
+        4. fuse up_proj and gate (TODO)
+        """
+        for attr_name in self.quant_weight_name_list:
+            w4a16_weight = MarlinWeights(
+                self.model_config.quantization_config["group_size"],
+                getattr(self, f"{attr_name}_B"),
+                getattr(self, f"{attr_name}_s"),
+            )
+            setattr(self, attr_name, w4a16_weight.convert_to_marlin_layer())
+            # delete useless weights
+            del getattr(self, f"{attr_name}_B")
+            del getattr(self, f"{attr_name}_s")
+
+
+        # TODO: how to fuse up_gate_proj ????
+
+        # self.up_gate_proj = torch.cat((self.up_proj, self.gate_proj), dim=0).contiguous()
+        # del self.up_proj, self.gate_proj
+
+
+
+class LLamaWeightMarlin(WeightBase):
+    def __init__(
+        self,
+        model_config: LlamaModelConfig,
+        dtype: torch.dtype
+    ):
+        super().__init__()
+
+        self.model_config = model_config
+        self.dtype = dtype
+        self.register_weight(RegisteredWeightItem(
+            "wte",
+            "model.embed_tokens.weight",
+            (self.model_config.vocab_size, self.model_config.hidden_size),
+            self.dtype
+        ))
+        if self.model_config.tie_word_embeddings:
+            self.register_weight(RegisteredWeightItem(
+                "lm_head",
+                "model.embed_tokens.weight",
+                (self.model_config.vocab_size, self.model_config.hidden_size),
+                self.dtype
+            ))
+        else:
+            self.register_weight(RegisteredWeightItem(
+                "lm_head",
+                "lm_head.weight",
+                (self.model_config.vocab_size, self.model_config.hidden_size),
+                self.dtype
+            ))
+        self.register_weight(RegisteredWeightItem(
+            "final_norm",
+            "model.norm.weight",
+            (self.model_config.hidden_size,),
+            self.dtype
+        ))
+
+        self.layers: list[LlamaTransformerLayerWeightMarlin] = []
+        for i in range(self.model_config.num_layers):
+            self.layers.append(
+                LlamaTransformerLayerWeightMarlin(i, model_config, dtype)
+            )
+
+    def _post_process_after_load(self, getter: callable):
+        for layer in self.layers:
+            layer.load_weights(getter)
+
+
+
 
 def load_weights(
     model_config: LlamaModelConfig,
     dtype: torch.dtype,
     model_path: str,
     use_dummy: bool = False
-) -> LlamaWeight:
+) -> Union[LlamaWeight, LLamaWeightMarlin]:
     """
     Load weights from a given path
     """
@@ -244,6 +454,6 @@ def load_weights(
                 return file[item.key].to(item.dtype)
             getter = weight_getter_real
 
-    weight = LlamaWeight(model_config, dtype)
+    weight = LlamaWeight(model_config, dtype) if model_config.quantization_config is None else LLamaWeightMarlin(model_config, dtype)
     weight.load_weights(getter)
     return weight

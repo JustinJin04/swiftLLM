@@ -27,10 +27,7 @@ class LlamaModelConfig:
         self.ffn_inter_dim = model_config["intermediate_size"]
         self.rotary_base = model_config.get("rope_theta", model_config.get("rotary_base", 10000))
         self.rms_norm_eps = model_config["rms_norm_eps"]
-        # self.rope_scaling = model_config.get("rope_scaling", 1.0)
         self.rope_theta = model_config.get("rope_theta", 10000)
-        # if self.rope_scaling is None:
-        #     self.rope_scaling = 1.0
         assert model_config["hidden_act"] == "silu"
         
         # TODO: how to deal with the rope_scaling as a dict??
@@ -40,10 +37,11 @@ class LlamaModelConfig:
         elif(isinstance(self.rope_scaling, dict)):
             print(f"Warning: how to deal with the rope_scaling as a dict??")
             print(self.rope_scaling)
-            # self.rope_scaling = self.rope_scaling["factor"]
         
         self.tie_word_embeddings = model_config.get("tie_word_embeddings", False)
-        # assert self.tie_word_embeddings == False, "currently we don't support tying lm_head with wte"
+
+        self.quantization_config = model_config.get("quantization_config", None)
+
         
 
     def get_kvslot_size(self, dtype: torch.dtype = torch.float16) -> int:

@@ -12,24 +12,13 @@ from swiftllm.worker.output import ModelOutput
 import swiftllm_c
 
 from .layers.pre_layer import LlamaPreLayer
-from .layers.transformer_layer import LlamaTransformerLayer
+from .layers.transformer_layer import LlamaTransformerLayer, LlamaTransformerLayerMarlin
 from .layers.post_layer import LlamaPostLayer
 from .infer_state import LlamaInferState
 
-class LlamaModel:
-    """
-    LlamaModel - A Llama model that can be used for inference.
 
-    This class also acts as a "worker" that resides on a particular GPU, waiting
-    for the control plane (the scheduler) to send commands.
-
-    To initialize, please:
-    - call __init__()
-    - call load_weights()
-    - call profile_num_blocks() on one worker
-    - call init_kvcache_and_swap()
-    """
-
+class LlamaModelBase:
+    
     @torch.inference_mode()
     def __init__(
         self,
@@ -59,37 +48,16 @@ class LlamaModel:
 
         # Block manager
         self.cpu_block_manager = self.gpu_block_manager = None
-        
+
     @torch.inference_mode()
     def _load_weights(self):
         """
         Load weights and initialize layers
         """
-        # Load weights
-        self.weight = load_weights(
-            self.model_config,
-            torch.float16,
-            self.engine_config.model_path,
-            self.engine_config.use_dummy
-        )
-
+        # raise NotImplementedError("LlamaModelBase is an abstract class")
+        
         # Initialize rotary embeddings
         self._init_to_get_rotary()
-
-        # Initialize layers
-        decoding_piggyback_stream = torch.cuda.Stream()
-        self.pre_layer = LlamaPreLayer(self.model_config, self.weight)
-        self.transformer_layers = [
-            LlamaTransformerLayer(
-                self.model_config,
-                self.engine_config,
-                self.weight.layers[layer_id],
-                decoding_piggyback_stream,
-                layer_id
-            )
-            for layer_id in range(self.model_config.num_layers)
-        ]
-        self.post_layer = LlamaPostLayer(self.model_config, self.weight)
 
     @torch.inference_mode()
     def _profile_num_blocks(self, original_peak_memory) -> int:
@@ -130,7 +98,7 @@ class LlamaModel:
 
         torch.cuda.empty_cache()
         return num_gpu_blocks
-    
+
     @torch.inference_mode()
     def _init_kvcache_and_swap(self, num_blocks: int):
         self.num_blocks = num_blocks
@@ -244,7 +212,7 @@ class LlamaModel:
         input_embds += residual_buf
         model_output = self.post_layer.forward(input_embds, infer_state)
         return model_output
-    
+
     @torch.inference_mode()
     def forward(
         self,
@@ -279,6 +247,9 @@ class LlamaModel:
 
         decoding_seq_lens = torch.tensor(decoding_seq_lens_list, dtype=torch.int32, device="cuda")
         max_decoding_len = max(decoding_seq_lens_list) if decoding_seq_lens_list else 0
+
+        assert max_prefill_len <= self.model_config.max_position_embeddings, "max_prefill_len exceeds max_position_embeddings"
+        assert max_decoding_len <= self.model_config.max_position_embeddings, "max_decoding_len exceeds max_position_embeddings"
 
         position_indices = torch.cat([
             torch.concat([
@@ -390,7 +361,6 @@ class LlamaModel:
             [seq_len],
         )
 
-
     @torch.inference_mode()
     def prefill_decode(
         self,
@@ -462,3 +432,90 @@ class LlamaModel:
         seq_ids = torch.tensor(seq_ids_list, dtype=torch.int32, device="cuda")
         self.gpu_block_manager.free_blocks_for_seqs(seq_ids)
         self.cpu_block_manager.free_blocks_for_seqs(seq_ids)
+
+
+class LlamaModel(LlamaModelBase):
+    """
+    LlamaModel - A Llama model that can be used for inference.
+
+    This class also acts as a "worker" that resides on a particular GPU, waiting
+    for the control plane (the scheduler) to send commands.
+
+    To initialize, please:
+    - call __init__()
+    - call load_weights()
+    - call profile_num_blocks() on one worker
+    - call init_kvcache_and_swap()
+    """
+        
+    @torch.inference_mode()
+    def _load_weights(self):
+        """
+        Load weights and initialize layers
+        """
+        
+        assert self.model_config.quantization_config is None, "LlamaModel is not a quantized model. Use LlamaModelMarlin instead."
+        
+        # Initialize rotary embeddings
+        super()._load_weights()
+        
+        # Load weights
+        self.weight = load_weights(
+            self.model_config,
+            torch.float16,
+            self.engine_config.model_path,
+            self.engine_config.use_dummy
+        )
+
+        # Initialize layers
+        decoding_piggyback_stream = torch.cuda.Stream()
+        self.pre_layer = LlamaPreLayer(self.model_config, self.weight)
+        self.transformer_layers = [
+            LlamaTransformerLayer(
+                self.model_config,
+                self.engine_config,
+                self.weight.layers[layer_id],
+                decoding_piggyback_stream,
+                layer_id
+            )
+            for layer_id in range(self.model_config.num_layers)
+        ]
+        self.post_layer = LlamaPostLayer(self.model_config, self.weight)
+
+class LlamaModelMarlin(LlamaModelBase):       
+    @torch.inference_mode()
+    def _load_weights(self):
+        """
+        Load weights and initialize layers
+        """
+
+        assert self.model_config.quantization_config is not None, "LlamaModelMarlin is a quantized model. Use LlamaModel instead."
+
+        # Initialize rotary embeddings
+        super()._load_weights()
+        
+        # Load weights
+        self.weight = load_weights(
+            self.model_config,
+            torch.float16,
+            self.engine_config.model_path,
+            self.engine_config.use_dummy
+        )
+
+        # Initialize layers
+        decoding_piggyback_stream = torch.cuda.Stream()
+        self.pre_layer = LlamaPreLayer(self.model_config, self.weight)
+        self.transformer_layers = [
+            LlamaTransformerLayerMarlin(
+                self.model_config,
+                self.engine_config,
+                self.weight.layers[layer_id],
+                decoding_piggyback_stream,
+                layer_id
+            )
+            for layer_id in range(self.model_config.num_layers)
+        ]
+        self.post_layer = LlamaPostLayer(self.model_config, self.weight)
+
+        
+
