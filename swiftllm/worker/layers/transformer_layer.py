@@ -58,6 +58,9 @@ class LlamaTransformerLayer:
         k = k.view(-1, self.model_config.num_kv_heads, self.model_config.head_dim)	# [num_total_tokens, num_kv_heads, head_dim]
         v = v.view(-1, self.model_config.num_kv_heads, self.model_config.head_dim)	# [num_total_tokens, num_kv_heads, head_dim]
 
+        # print(f"q: {q.shape}\nk: {k.shape}")
+        # print(f"infer_state.position_cos: {infer_state.position_cos.shape}\ninfer_state.position_sin: {infer_state.position_sin.shape}")
+
         # Rotary emb
         rotary_embedding_inplace(
             q,
@@ -174,6 +177,10 @@ class LlamaTransformerLayerMarlin:
         k = k.view(-1, self.model_config.num_kv_heads, self.model_config.head_dim)	# [num_total_tokens, num_kv_heads, head_dim]
         v = v.view(-1, self.model_config.num_kv_heads, self.model_config.head_dim)	# [num_total_tokens, num_kv_heads, head_dim]
 
+        # print(f"q: {q}")
+        # print(f"q: {q.shape}\nk: {k.shape}")
+        # print(f"infer_state.position_cos: {infer_state.position_cos.shape}\ninfer_state.position_sin: {infer_state.position_sin.shape}")
+
         # Rotary emb
         rotary_embedding_inplace(
             q,
@@ -243,7 +250,7 @@ class LlamaTransformerLayerMarlin:
         # how to support fused version??
         up = self.weight.up_proj(o)
         gate = self.weight.gate_proj(o)
-        up_gate_proj = torch.cat([up, gate], dim=-1)
+        up_gate_proj = torch.cat([up, gate], dim=1)
         silu_and_mul_inplace(up_gate_proj)
         ffn_out = self.weight.down_proj(up_gate_proj[:, :self.model_config.ffn_inter_dim])
 

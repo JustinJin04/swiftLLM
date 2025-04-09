@@ -181,9 +181,6 @@ class LlamaWeight(WeightBase):
         for layer in self.layers:
             layer.load_weights(getter)
 
-import torch
-import dataclasses
-from typing import Tuple
 
 @dataclasses.dataclass
 class MarlinWeights:
@@ -198,16 +195,17 @@ class MarlinWeights:
     def outfeatures(self) -> int:
         return self.s.shape[1]
 
-    def convert_to_marlin_layer(self) -> 'marlin.Layer':
+    def convert_to_marlin_layer(self) -> marlin.Layer:
         """Convert to optimized Marlin format"""
-
         layer = marlin.Layer(
             self.infeatures, 
             self.outfeatures,
             groupsize=self.groupsize
-        )
-        layer.B = self.B
-        layer.s = self.s
+        ).to(self.B.device)  # <-- move the entire layer to the correct device
+
+        layer.B.copy_(self.B)
+        layer.s.copy_(self.s)
+        assert layer.B.device == self.B.device
         return layer
 
 
@@ -217,7 +215,8 @@ class LlamaTransformerLayerWeightMarlin(WeightBase):
         self, 
         attr_name: str, 
         key: str, 
-        shape: tuple,
+        infeatures: int,
+        outfeatures: int,
         dtype: torch.dtype,
     ):
         """
@@ -225,7 +224,6 @@ class LlamaTransformerLayerWeightMarlin(WeightBase):
         B: torch.Tensor # [infeatures // 16, outfeatures*2], int32
         s: torch.Tensor # [infeatures // groupsize, outfeatures], float16
         """
-        infeatures, outfeatures = shape
         groupsize = self.model_config.quantization_config["group_size"]
         assert groupsize == 128
         
@@ -273,43 +271,50 @@ class LlamaTransformerLayerWeightMarlin(WeightBase):
         self._register_quant_weight(
             "q_proj",
             f"model.layers.{self.layer_id}.self_attn.q_proj",
-            (self.model_config.hidden_size, self.model_config.hidden_size),
+            self.model_config.hidden_size,
+            self.model_config.hidden_size,
             self.dtype
         )
         self._register_quant_weight(
             "k_proj",
-            f"model.layers.{self.layer_id}.self_attn.k_proj.weight",
-            (self.model_config.num_kv_heads*self.model_config.head_dim, self.model_config.hidden_size),
+            f"model.layers.{self.layer_id}.self_attn.k_proj",
+            self.model_config.hidden_size,
+            self.model_config.num_kv_heads*self.model_config.head_dim,
             self.dtype
         )
         self._register_quant_weight(
             "v_proj",
-            f"model.layers.{self.layer_id}.self_attn.v_proj.weight",
-            (self.model_config.num_kv_heads*self.model_config.head_dim, self.model_config.hidden_size),
+            f"model.layers.{self.layer_id}.self_attn.v_proj",
+            self.model_config.hidden_size,
+            self.model_config.num_kv_heads*self.model_config.head_dim,
             self.dtype
         )
         self._register_quant_weight(
             "o_proj",
-            f"model.layers.{self.layer_id}.self_attn.o_proj.weight",
-            (self.model_config.hidden_size, self.model_config.hidden_size),
+            f"model.layers.{self.layer_id}.self_attn.o_proj",
+            self.model_config.hidden_size,
+            self.model_config.hidden_size,
             self.dtype
         )
         self._register_quant_weight(
             "up_proj",
-            f"model.layers.{self.layer_id}.mlp.up_proj.weight",
-            (self.model_config.ffn_inter_dim, self.model_config.hidden_size),
+            f"model.layers.{self.layer_id}.mlp.up_proj",
+            self.model_config.hidden_size,
+            self.model_config.ffn_inter_dim,
             self.dtype
         )
         self._register_quant_weight(
             "gate_proj",
-            f"model.layers.{self.layer_id}.mlp.gate_proj.weight",
-            (self.model_config.ffn_inter_dim, self.model_config.hidden_size),
+            f"model.layers.{self.layer_id}.mlp.gate_proj",
+            self.model_config.hidden_size,
+            self.model_config.ffn_inter_dim,
             self.dtype
         )
         self._register_quant_weight(
             "down_proj",
-            f"model.layers.{self.layer_id}.mlp.down_proj.weight",
-            (self.model_config.hidden_size, self.model_config.ffn_inter_dim),
+            f"model.layers.{self.layer_id}.mlp.down_proj",
+            self.model_config.ffn_inter_dim,
+            self.model_config.hidden_size,
             self.dtype
         )
 
@@ -329,8 +334,8 @@ class LlamaTransformerLayerWeightMarlin(WeightBase):
             )
             setattr(self, attr_name, w4a16_weight.convert_to_marlin_layer())
             # delete useless weights
-            del getattr(self, f"{attr_name}_B")
-            del getattr(self, f"{attr_name}_s")
+            delattr(self, f"{attr_name}_B")
+            delattr(self, f"{attr_name}_s")
 
 
         # TODO: how to fuse up_gate_proj ????

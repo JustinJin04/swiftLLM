@@ -22,14 +22,14 @@ def main():
         use_dummy=False,
 
         block_size=16,
-        gpu_mem_utilization=0.8,
+        gpu_mem_utilization=0.5,
         num_cpu_blocks=0,
         max_seqs_in_block_table=4,
         max_blocks_per_seq=2048,
 
         # The following are not used in the offline example
         max_batch_size=1,
-        max_tokens_in_batch=2048*8,
+        max_tokens_in_batch=2048,
 
         # spec decoding
         num_lookahead_tokens=1,
