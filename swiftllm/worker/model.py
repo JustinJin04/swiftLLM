@@ -380,8 +380,8 @@ class LlamaModelBase:
         input_seq_len = len(input_ids)
 
         # used for debug
-        tokenizer = AutoTokenizer.from_pretrained(self.engine_config.model_path)
-        print(f"{tokenizer.decode(input_ids, skip_special_tokens=True)}|{tokenizer.decode(final_output_ids, skip_special_tokens=True)}")
+        # tokenizer = AutoTokenizer.from_pretrained(self.engine_config.model_path)
+        # print(f"{tokenizer.decode(input_ids, skip_special_tokens=True)}|{tokenizer.decode(final_output_ids, skip_special_tokens=True)}")
 
         while True:
             input_seq_len += 1
@@ -393,7 +393,7 @@ class LlamaModelBase:
             final_output_ids.append(input_id)
 
             # used for debug
-            print(f"{tokenizer.decode(input_ids, skip_special_tokens=True)}|{tokenizer.decode(final_output_ids, skip_special_tokens=True)}")
+            # print(f"{tokenizer.decode(input_ids, skip_special_tokens=True)}|{tokenizer.decode(final_output_ids, skip_special_tokens=True)}")
 
             if len(final_output_ids) >= num_max_tokens_to_generate:
                 break
