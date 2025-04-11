@@ -176,7 +176,7 @@ def load_model(model_path):
 
 
 # Load model from disk.
-model_path = "/home/gehao/jz/deepseek/model/llama-2-7b-chat-marlin"
+model_path = "/zhan/model/llama2-7b-marlin"
 model = load_model(model_path).to("cuda")
 tokenizer = AutoTokenizer.from_pretrained(model_path)
 

@@ -132,7 +132,7 @@ class LlamaTransformerLayer:
 
         return ffn_out
 
-class LlamaTransformerLayerMarlin:
+class LlamaTransformerLayerQuantized:
     def __init__(
         self,
         model_config: LlamaModelConfig,

@@ -22,7 +22,7 @@ def main():
         use_dummy=False,
 
         block_size=16,
-        gpu_mem_utilization=0.9,
+        gpu_mem_utilization=0.1,
         num_cpu_blocks=0,
         max_seqs_in_block_table=4,
         max_blocks_per_seq=2048,
@@ -44,7 +44,7 @@ def main():
     
     # prompt = "0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40"
     # input_ids = tokenizer(prompt)['input_ids']
-    prompt = "1 2 3 4 5 6 7 8 9 10 11"
+    prompt = "To be or not to be, that's"
     input_ids = tokenizer(prompt)['input_ids']
 
     model_output = model.prefill_decode(

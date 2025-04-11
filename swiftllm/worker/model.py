@@ -14,7 +14,7 @@ from swiftllm.worker.output import ModelOutput
 import swiftllm_c
 
 from .layers.pre_layer import LlamaPreLayer
-from .layers.transformer_layer import LlamaTransformerLayer, LlamaTransformerLayerMarlin
+from .layers.transformer_layer import LlamaTransformerLayer, LlamaTransformerLayerQuantized
 from .layers.post_layer import LlamaPostLayer
 from .infer_state import LlamaInferState
 
@@ -120,8 +120,8 @@ class LlamaModelBase:
         )
         # Here we use torch.zeros instead of torch.empty, since that torch.empty
         # has the possibility to contain NaNs, which will cause the model to output NaNs.
-        self.k_cache = torch.zeros(kvcache_shape, dtype=torch.float16, device="cuda")
-        self.v_cache = torch.zeros(kvcache_shape, dtype=torch.float16, device="cuda")
+        self.k_cache = torch.zeros(kvcache_shape, dtype=self.model_config.dtype, device="cuda")
+        self.v_cache = torch.zeros(kvcache_shape, dtype=self.model_config.dtype, device="cuda")
 
         # Initialize KV swap space
         kvswap_shape = (
@@ -131,8 +131,8 @@ class LlamaModelBase:
             self.engine_config.block_size,
             self.model_config.head_dim
         )
-        self.k_swap = torch.zeros(kvswap_shape, dtype=torch.float16, device="cpu")
-        self.v_swap = torch.zeros(kvswap_shape, dtype=torch.float16, device="cpu")
+        self.k_swap = torch.zeros(kvswap_shape, dtype=self.model_config.dtype, device="cpu")
+        self.v_swap = torch.zeros(kvswap_shape, dtype=self.model_config.dtype, device="cpu")
 
         # Initialize block manager
         self.gpu_block_manager = BlockManager(
@@ -193,8 +193,8 @@ class LlamaModelBase:
         t = torch.arange(max_seq_len + 128, device="cuda", dtype=torch.float32) / rope_scaling_factor
         freqs = torch.outer(t, inv_freq)
 
-        self._cos_cached = torch.cos(freqs).to(torch.float16)
-        self._sin_cached = torch.sin(freqs).to(torch.float16)
+        self._cos_cached = torch.cos(freqs).to(self.model_config.dtype)
+        self._sin_cached = torch.sin(freqs).to(self.model_config.dtype)
 
     @torch.inference_mode()
     def _forward(
@@ -474,12 +474,7 @@ class LlamaModel(LlamaModelBase):
         For quantized/non-quantized model, the only difference is the transformer layer
         """
         
-        assert self.model_config.quantization_config is None or \
-        (
-            self.model_config.quantization_config["quant_method"] == "marlin" and \
-            self.model_config.quantization_config["group_size"] == 128
-        )
-        use_marlin = True if self.model_config.quantization_config else False
+        use_quantized = True if self.model_config.quantization_config else False
 
         # Initialize rotary embeddings
         super()._load_weights()
@@ -487,7 +482,7 @@ class LlamaModel(LlamaModelBase):
         # Load weights
         self.weight = load_weights(
             self.model_config,
-            torch.float16,
+            self.model_config.dtype,
             self.engine_config.model_path,
             self.engine_config.use_dummy
         )
@@ -502,8 +497,8 @@ class LlamaModel(LlamaModelBase):
                 self.weight.layers[layer_id],
                 decoding_piggyback_stream,
                 layer_id
-            ) if not use_marlin else \
-            LlamaTransformerLayerMarlin(
+            ) if not use_quantized else \
+            LlamaTransformerLayerQuantized(
                 self.model_config,
                 self.engine_config,
                 self.weight.layers[layer_id],

@@ -42,6 +42,22 @@ class LlamaModelConfig:
 
         self.quantization_config = model_config.get("quantization_config", None)
 
+        def str_to_torch_dtype(dtype_str: str) -> torch.dtype:
+            dtype_map = {
+                "float16": torch.float16,
+                "fp16": torch.float16,
+                "half": torch.float16,
+                "bfloat16": torch.bfloat16,
+                "bf16": torch.bfloat16,
+                "float32": torch.float32,
+                "fp32": torch.float32,
+            }
+            if dtype_str.lower() not in dtype_map:
+                raise ValueError(f"Unsupported dtype string: {dtype_str}")
+            return dtype_map[dtype_str.lower()]
+        self.dtype = str_to_torch_dtype(model_config["torch_dtype"])
+        assert self.dtype in (torch.bfloat16, torch.float16)
+
         
 
     def get_kvslot_size(self, dtype: torch.dtype = torch.float16) -> int:
