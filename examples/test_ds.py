@@ -22,7 +22,7 @@ def main():
         use_dummy=False,
 
         block_size=16,
-        gpu_mem_utilization=0.1,
+        gpu_mem_utilization=0.5,
         num_cpu_blocks=0,
         max_seqs_in_block_table=4,
         max_blocks_per_seq=2048,
@@ -42,12 +42,8 @@ def main():
     
     tokenizer = AutoTokenizer.from_pretrained(args.model_path)
     
-    prompt = "write a quick sort algorithm in python."
-    messages=[{ 
-        'role': 'user',
-        'content': prompt}
-    ]
-    input_ids = tokenizer.apply_chat_template(messages, add_generation_prompt=True, return_tensors="pt")[0].to("cuda")
+    prompt = "Write a short story about a robot learning to love."
+    input_ids = tokenizer.encode(prompt)
 
     model_output = model.prefill_decode(
         input_ids,

@@ -14,7 +14,7 @@ from swiftllm.worker.output import ModelOutput
 import swiftllm_c
 
 from .layers.pre_layer import LlamaPreLayer
-from .layers.transformer_layer import LlamaTransformerLayer, LlamaTransformerLayerQuantized
+from .layers.transformer_layer import LlamaTransformerLayer
 from .layers.post_layer import LlamaPostLayer
 from .infer_state import LlamaInferState
 
@@ -492,13 +492,6 @@ class LlamaModel(LlamaModelBase):
         self.pre_layer = LlamaPreLayer(self.model_config, self.weight)
         self.transformer_layers = [
             LlamaTransformerLayer(
-                self.model_config,
-                self.engine_config,
-                self.weight.layers[layer_id],
-                decoding_piggyback_stream,
-                layer_id
-            ) if not use_quantized else \
-            LlamaTransformerLayerQuantized(
                 self.model_config,
                 self.engine_config,
                 self.weight.layers[layer_id],

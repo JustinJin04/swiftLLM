@@ -6,7 +6,6 @@ from typing import Union
 import torch
 import safetensors
 import marlin
-from .kernels.machete import MacheteLayer
 
 from swiftllm.model_config import LlamaModelConfig
 
@@ -128,10 +127,30 @@ class LlamaTransformerLayerWeight(WeightBase):
         ))
 
     def _post_process_after_load(self, getter: callable):
+        # wrap with torch.nn.Linear
+        for attr_name in ["q_proj", "k_proj", "v_proj", "o_proj", "down_proj"]:
+            weight = getattr(self, attr_name)
+            setattr(self, attr_name, torch.nn.Linear(
+                in_features=weight.shape[1],
+                out_features=weight.shape[0],
+                bias=False,
+                device=weight.device,
+                dtype=weight.dtype)
+            )
+            getattr(self, attr_name).weight.data.copy_(weight)
+
         # pylint: disable=no-member
         # self.qkv_proj = torch.cat((self.q_proj, self.k_proj, self.v_proj), dim=0).contiguous()
         # del self.q_proj, self.k_proj, self.v_proj
-        self.up_gate_proj = torch.cat((self.up_proj, self.gate_proj), dim=0).contiguous()
+        up_gate_proj = torch.cat((self.up_proj, self.gate_proj), dim=0).contiguous()
+        self.up_gate_proj = torch.nn.Linear(
+            in_features=up_gate_proj.shape[1],
+            out_features=up_gate_proj.shape[0],
+            bias=False,
+            device=up_gate_proj.device,
+            dtype=up_gate_proj.dtype
+        )
+        self.up_gate_proj.weight.data.copy_(up_gate_proj)
         del self.up_proj, self.gate_proj
 
 
@@ -344,7 +363,18 @@ class LlamaTransformerLayerWeightMarlin(WeightBase):
 
 
         # TODO: how to fuse up_gate_proj ????
-
+        up_unpack = marlin.unpack_unswizzle_untile(self.up_proj.B)
+        gate_unpack = marlin.unpack_unswizzle_untile(self.gate_proj.B)
+        up_gate = torch.cat((up_unpack, gate_unpack), dim=1).contiguous()
+        up_gate_B = marlin.tile_swizzle_pack(up_gate)
+        up_gate_s = torch.cat((self.up_proj.s, self.gate_proj.s), dim=1).contiguous()
+        up_gate_weight = MarlinWeights(
+            self.model_config.quantization_config["group_size"],
+            up_gate_B,
+            up_gate_s
+        )
+        self.up_gate_proj = up_gate_weight.convert_to_marlin_layer()
+        del self.up_proj, self.gate_proj
         # self.up_gate_proj = torch.cat((self.up_proj, self.gate_proj), dim=0).contiguous()
         # del self.up_proj, self.gate_proj
 
@@ -397,224 +427,13 @@ class LLamaWeightMarlin(WeightBase):
             layer.load_weights(getter)
 
 
-@dataclasses.dataclass
-class MacheteWeights:
-    B: torch.Tensor # [outfeatures, infeatures // 8]
-    s: torch.Tensor # [outfeatures, infeatures // groupsize]
-    dtype: torch.dtype
-    groupsize: int
-
-    @property
-    def infeatures(self) -> int:
-        return self.s.shape[1] * self.groupsize
-    @property
-    def outfeatures(self) -> int:
-        return self.s.shape[0]
-
-    def convert_to_machete_layer(self) -> MacheteLayer:
-        layer = MacheteLayer(
-            self.infeatures,
-            self.outfeatures,
-            self.dtype,
-            self.groupsize,
-        )
-        layer.transform_w_q(self.B)
-        layer.transform_w_s(self.s)
-        return layer
-
-
-class LlamaTransformerLayerWeightMachete(WeightBase):
-
-    def _register_quant_weight(
-        self, 
-        attr_name: str, 
-        key: str, 
-        infeatures: int,
-        outfeatures: int,
-        dtype: torch.dtype,
-    ):
-        """
-        register all tensors that are related to each weight. For examples:
-        B: torch.Tensor # [infeatures // 16, outfeatures*2], int32
-        s: torch.Tensor # [infeatures // groupsize, outfeatures], float16
-        """
-        # groupsize = self.model_config.quantization_config["group_size"]
-        groupsize = 128
-        assert groupsize == 128
-        
-        self.register_weight(RegisteredWeightItem(
-            f"{attr_name}_B",
-            f"{key}.weight_packed",
-            (outfeatures, infeatures // 8),
-            torch.int32
-        ))
-        self.register_weight(RegisteredWeightItem(
-            f"{attr_name}_s",
-            f"{key}.weight_scale",
-            (outfeatures, infeatures // groupsize),
-            self.model_config.dtype
-        ))
-        self.quant_weight_name_list.append(attr_name)
-
-
-    def __init__(
-        self,
-        layer_id: int,
-        model_config: LlamaModelConfig,
-        dtype: torch.dtype,
-    ):
-        super().__init__()
-
-        self.layer_id = layer_id
-        self.model_config = model_config
-        self.dtype = dtype
-
-        self.quant_weight_name_list: list[str] = []
-
-        self.register_weight(RegisteredWeightItem(
-            "attn_norm",
-            f"model.layers.{self.layer_id}.input_layernorm.weight",
-            (self.model_config.hidden_size,),
-            self.dtype
-        ))
-        self.register_weight(RegisteredWeightItem(
-            "ffn_norm",
-            f"model.layers.{self.layer_id}.post_attention_layernorm.weight",
-            (self.model_config.hidden_size,),
-            self.dtype
-        ))
-        self._register_quant_weight(
-            "q_proj",
-            f"model.layers.{self.layer_id}.self_attn.q_proj",
-            self.model_config.hidden_size,
-            self.model_config.hidden_size,
-            self.dtype
-        )
-        self._register_quant_weight(
-            "k_proj",
-            f"model.layers.{self.layer_id}.self_attn.k_proj",
-            self.model_config.hidden_size,
-            self.model_config.num_kv_heads*self.model_config.head_dim,
-            self.dtype
-        )
-        self._register_quant_weight(
-            "v_proj",
-            f"model.layers.{self.layer_id}.self_attn.v_proj",
-            self.model_config.hidden_size,
-            self.model_config.num_kv_heads*self.model_config.head_dim,
-            self.dtype
-        )
-        self._register_quant_weight(
-            "o_proj",
-            f"model.layers.{self.layer_id}.self_attn.o_proj",
-            self.model_config.hidden_size,
-            self.model_config.hidden_size,
-            self.dtype
-        )
-        self._register_quant_weight(
-            "up_proj",
-            f"model.layers.{self.layer_id}.mlp.up_proj",
-            self.model_config.hidden_size,
-            self.model_config.ffn_inter_dim,
-            self.dtype
-        )
-        self._register_quant_weight(
-            "gate_proj",
-            f"model.layers.{self.layer_id}.mlp.gate_proj",
-            self.model_config.hidden_size,
-            self.model_config.ffn_inter_dim,
-            self.dtype
-        )
-        self._register_quant_weight(
-            "down_proj",
-            f"model.layers.{self.layer_id}.mlp.down_proj",
-            self.model_config.ffn_inter_dim,
-            self.model_config.hidden_size,
-            self.dtype
-        )
-
-
-    def _post_process_after_load(self, getter):
-        """
-        1. convert quant weight to fp16
-        2. pack to marlin layer and store the B and s
-        3. delete useless weights
-        4. fuse up_proj and gate (TODO)
-        """
-        for attr_name in self.quant_weight_name_list:
-            w4a16_weight = MacheteWeights(
-                getattr(self, f"{attr_name}_B"),
-                getattr(self, f"{attr_name}_s"),
-                self.model_config.dtype,
-                # self.model_config.quantization_config["group_size"],
-                128
-            )
-            setattr(self, attr_name, w4a16_weight.convert_to_machete_layer())
-            # delete useless weights
-            delattr(self, f"{attr_name}_B")
-            delattr(self, f"{attr_name}_s")
-
-
-        # TODO: how to fuse up_gate_proj ????
-
-        # self.up_gate_proj = torch.cat((self.up_proj, self.gate_proj), dim=0).contiguous()
-        # del self.up_proj, self.gate_proj
-
-
-class LLamaWeightMachete(WeightBase):
-    def __init__(
-        self,
-        model_config: LlamaModelConfig,
-        dtype: torch.dtype
-    ):
-        super().__init__()
-
-        self.model_config = model_config
-        self.dtype = dtype
-        self.register_weight(RegisteredWeightItem(
-            "wte",
-            "model.embed_tokens.weight",
-            (self.model_config.vocab_size, self.model_config.hidden_size),
-            self.dtype
-        ))
-        if self.model_config.tie_word_embeddings:
-            self.register_weight(RegisteredWeightItem(
-                "lm_head",
-                "model.embed_tokens.weight",
-                (self.model_config.vocab_size, self.model_config.hidden_size),
-                self.dtype
-            ))
-        else:
-            self.register_weight(RegisteredWeightItem(
-                "lm_head",
-                "lm_head.weight",
-                (self.model_config.vocab_size, self.model_config.hidden_size),
-                self.dtype
-            ))
-        self.register_weight(RegisteredWeightItem(
-            "final_norm",
-            "model.norm.weight",
-            (self.model_config.hidden_size,),
-            self.dtype
-        ))
-
-        self.layers: list[LlamaTransformerLayerWeightMachete] = []
-        for i in range(self.model_config.num_layers):
-            self.layers.append(
-                LlamaTransformerLayerWeightMachete(i, model_config, dtype)
-            )
-
-    def _post_process_after_load(self, getter: callable):
-        for layer in self.layers:
-            layer.load_weights(getter)
-
 
 def load_weights(
     model_config: LlamaModelConfig,
     dtype: torch.dtype,
     model_path: str,
     use_dummy: bool = False
-) -> Union[LlamaWeight, LLamaWeightMarlin, LLamaWeightMachete]:
+) -> Union[LlamaWeight, LLamaWeightMarlin]:
     """
     Load weights from a given path
     """
@@ -679,7 +498,7 @@ def load_weights(
         elif model_config.quantization_config["quant_method"] == "marlin":
             return LLamaWeightMarlin
         else:
-            return LLamaWeightMachete
+            raise ValueError(f"Unsupported quantization method: {model_config.quantization_config['quant_method']}")
 
     weight = get_weight_type()(
         model_config,
@@ -687,3 +506,5 @@ def load_weights(
     )
     weight.load_weights(getter)
     return weight
+
+
