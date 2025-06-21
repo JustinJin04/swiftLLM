@@ -473,8 +473,6 @@ class LlamaModel(LlamaModelBase):
 
         For quantized/non-quantized model, the only difference is the transformer layer
         """
-        
-        use_quantized = True if self.model_config.quantization_config else False
 
         # Initialize rotary embeddings
         super()._load_weights()
@@ -484,7 +482,9 @@ class LlamaModel(LlamaModelBase):
             self.model_config,
             self.model_config.dtype,
             self.engine_config.model_path,
-            self.engine_config.use_dummy
+            self.engine_config.use_dummy,
+            self.engine_config.quantized_path,
+            self.engine_config.quantized_list
         )
 
         # Initialize layers

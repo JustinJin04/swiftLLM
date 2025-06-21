@@ -1,7 +1,7 @@
-import dataclasses
+from dataclasses import dataclass, field
 import argparse
 
-@dataclasses.dataclass
+@dataclass
 class EngineConfig:
     """
     Configuration for the SwiftLLM engine.
@@ -24,6 +24,12 @@ class EngineConfig:
 
     # Specdecoding
     num_lookahead_tokens: int
+
+    # Mixed quantization
+    quantized_path: str = ""
+    quantized_list: list[str] = field(default_factory=list)
+
+
 
     @staticmethod
     def add_cli_args(parser: argparse.ArgumentParser):
